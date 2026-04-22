@@ -5,6 +5,7 @@ import uuid
 import asyncio
 import contextvars
 import inspect
+import threading
 from typing import Any, Callable, Optional, Type, Tuple, List, Dict, Union, Coroutine
 from dataclasses import dataclass, field
 from contextlib import contextmanager
@@ -65,6 +66,12 @@ class RateLimitState:
     calls: List[float] = field(default_factory=list)
     max_calls: int = 10
     time_window: float = 60.0
+    _lock: Union[threading.Lock, asyncio.Lock, None] = None
+    
+    def get_lock(self, is_async: bool = False):
+        if self._lock is None:
+            self._lock = asyncio.Lock() if is_async else threading.Lock()
+        return self._lock
 
 
 def log(level: str = "INFO", log_args: bool = True, log_return: bool = True, 
@@ -83,40 +90,46 @@ def log(level: str = "INFO", log_args: bool = True, log_return: bool = True,
                 
                 log_event(dec_name, "ENTER", func.__name__, level=log_level)
                 
-                with with_nesting_level():
-                    call_id = global_chain_id.get()
-                    start_time = time.time()
-                    
-                    extra_parts = []
-                    if log_args:
-                        extra_parts.append(f"ARGS={args} KWARGS={kwargs}")
-                    if extra_parts:
-                        log_event(dec_name, "PARAMS", func.__name__, " ".join(extra_parts), level=log_level)
-                    
-                    try:
-                        result = await func(*args, **kwargs)
-                        elapsed = time.time() - start_time
-                        
-                        result_parts = []
-                        if log_return:
-                            result_parts.append(f"RETURN={result}")
-                        if log_time:
-                            result_parts.append(f"ELAPSED={elapsed:.4f}s")
-                        if result_parts:
-                            log_event(dec_name, "RESULT", func.__name__, " ".join(result_parts), level=log_level)
-                        
-                        return result
-                        
-                    except Exception as e:
-                        elapsed = time.time() - start_time
-                        log_event(
-                            dec_name, "EXCEPTION", func.__name__,
-                            f"{type(e).__name__}: {e} ELAPSED={elapsed:.4f}s",
-                            level=logging.ERROR
-                        )
-                        raise
+                result = None
+                exception_occurred = False
                 
-                log_event(dec_name, "EXIT", func.__name__, level=log_level)
+                try:
+                    with with_nesting_level():
+                        call_id = global_chain_id.get()
+                        start_time = time.time()
+                        
+                        extra_parts = []
+                        if log_args:
+                            extra_parts.append(f"ARGS={args} KWARGS={kwargs}")
+                        if extra_parts:
+                            log_event(dec_name, "PARAMS", func.__name__, " ".join(extra_parts), level=log_level)
+                        
+                        try:
+                            result = await func(*args, **kwargs)
+                            elapsed = time.time() - start_time
+                            
+                            result_parts = []
+                            if log_return:
+                                result_parts.append(f"RETURN={result}")
+                            if log_time:
+                                result_parts.append(f"ELAPSED={elapsed:.4f}s")
+                            if result_parts:
+                                log_event(dec_name, "RESULT", func.__name__, " ".join(result_parts), level=log_level)
+                            
+                            return result
+                            
+                        except Exception as e:
+                            exception_occurred = True
+                            elapsed = time.time() - start_time
+                            log_event(
+                                dec_name, "EXCEPTION", func.__name__,
+                                f"{type(e).__name__}: {e} ELAPSED={elapsed:.4f}s",
+                                level=logging.ERROR
+                            )
+                            raise
+                finally:
+                    exit_status = "EXCEPTION" if exception_occurred else "EXIT"
+                    log_event(dec_name, exit_status, func.__name__, level=log_level if not exception_occurred else logging.ERROR)
             
             return async_wrapper
         
@@ -128,40 +141,46 @@ def log(level: str = "INFO", log_args: bool = True, log_return: bool = True,
                 
                 log_event(dec_name, "ENTER", func.__name__, level=log_level)
                 
-                with with_nesting_level():
-                    call_id = global_chain_id.get()
-                    start_time = time.time()
-                    
-                    extra_parts = []
-                    if log_args:
-                        extra_parts.append(f"ARGS={args} KWARGS={kwargs}")
-                    if extra_parts:
-                        log_event(dec_name, "PARAMS", func.__name__, " ".join(extra_parts), level=log_level)
-                    
-                    try:
-                        result = func(*args, **kwargs)
-                        elapsed = time.time() - start_time
-                        
-                        result_parts = []
-                        if log_return:
-                            result_parts.append(f"RETURN={result}")
-                        if log_time:
-                            result_parts.append(f"ELAPSED={elapsed:.4f}s")
-                        if result_parts:
-                            log_event(dec_name, "RESULT", func.__name__, " ".join(result_parts), level=log_level)
-                        
-                        return result
-                        
-                    except Exception as e:
-                        elapsed = time.time() - start_time
-                        log_event(
-                            dec_name, "EXCEPTION", func.__name__,
-                            f"{type(e).__name__}: {e} ELAPSED={elapsed:.4f}s",
-                            level=logging.ERROR
-                        )
-                        raise
+                result = None
+                exception_occurred = False
                 
-                log_event(dec_name, "EXIT", func.__name__, level=log_level)
+                try:
+                    with with_nesting_level():
+                        call_id = global_chain_id.get()
+                        start_time = time.time()
+                        
+                        extra_parts = []
+                        if log_args:
+                            extra_parts.append(f"ARGS={args} KWARGS={kwargs}")
+                        if extra_parts:
+                            log_event(dec_name, "PARAMS", func.__name__, " ".join(extra_parts), level=log_level)
+                        
+                        try:
+                            result = func(*args, **kwargs)
+                            elapsed = time.time() - start_time
+                            
+                            result_parts = []
+                            if log_return:
+                                result_parts.append(f"RETURN={result}")
+                            if log_time:
+                                result_parts.append(f"ELAPSED={elapsed:.4f}s")
+                            if result_parts:
+                                log_event(dec_name, "RESULT", func.__name__, " ".join(result_parts), level=log_level)
+                            
+                            return result
+                            
+                        except Exception as e:
+                            exception_occurred = True
+                            elapsed = time.time() - start_time
+                            log_event(
+                                dec_name, "EXCEPTION", func.__name__,
+                                f"{type(e).__name__}: {e} ELAPSED={elapsed:.4f}s",
+                                level=logging.ERROR
+                            )
+                            raise
+                finally:
+                    exit_status = "EXCEPTION" if exception_occurred else "EXIT"
+                    log_event(dec_name, exit_status, func.__name__, level=log_level if not exception_occurred else logging.ERROR)
             
             return wrapper
     
@@ -186,20 +205,25 @@ def timer(unit: str = "ms", precision: int = 4, log_level: str = "INFO") -> Call
                 
                 log_event(dec_name, "ENTER", func.__name__, f"[UNIT={unit_name}]", level=log_level_val)
                 
-                with with_nesting_level():
-                    start_time = time.perf_counter()
-                    try:
-                        result = await func(*args, **kwargs)
-                        return result
-                    finally:
-                        elapsed = (time.perf_counter() - start_time) * multiplier
-                        log_event(
-                            dec_name, "EXIT", func.__name__,
-                            f"[DURATION={elapsed:.{precision}f}{unit_name}]",
-                            level=log_level_val
-                        )
+                start_time = time.perf_counter()
+                exception_occurred = False
                 
-                log_event(dec_name, "EXIT", func.__name__, level=log_level_val)
+                try:
+                    with with_nesting_level():
+                        try:
+                            result = await func(*args, **kwargs)
+                            return result
+                        except Exception:
+                            exception_occurred = True
+                            raise
+                finally:
+                    elapsed = (time.perf_counter() - start_time) * multiplier
+                    exit_status = "EXCEPTION" if exception_occurred else "EXIT"
+                    log_event(
+                        dec_name, exit_status, func.__name__,
+                        f"[DURATION={elapsed:.{precision}f}{unit_name}]",
+                        level=log_level_val if not exception_occurred else logging.WARNING
+                    )
             
             return async_wrapper
         
@@ -211,20 +235,25 @@ def timer(unit: str = "ms", precision: int = 4, log_level: str = "INFO") -> Call
                 
                 log_event(dec_name, "ENTER", func.__name__, f"[UNIT={unit_name}]", level=log_level_val)
                 
-                with with_nesting_level():
-                    start_time = time.perf_counter()
-                    try:
-                        result = func(*args, **kwargs)
-                        return result
-                    finally:
-                        elapsed = (time.perf_counter() - start_time) * multiplier
-                        log_event(
-                            dec_name, "EXIT", func.__name__,
-                            f"[DURATION={elapsed:.{precision}f}{unit_name}]",
-                            level=log_level_val
-                        )
+                start_time = time.perf_counter()
+                exception_occurred = False
                 
-                log_event(dec_name, "EXIT", func.__name__, level=log_level_val)
+                try:
+                    with with_nesting_level():
+                        try:
+                            result = func(*args, **kwargs)
+                            return result
+                        except Exception:
+                            exception_occurred = True
+                            raise
+                finally:
+                    elapsed = (time.perf_counter() - start_time) * multiplier
+                    exit_status = "EXCEPTION" if exception_occurred else "EXIT"
+                    log_event(
+                        dec_name, exit_status, func.__name__,
+                        f"[DURATION={elapsed:.{precision}f}{unit_name}]",
+                        level=log_level_val if not exception_occurred else logging.WARNING
+                    )
             
             return wrapper
     
@@ -248,24 +277,39 @@ def catch(exceptions: Tuple[Type[Exception], ...] = (Exception,),
                 
                 log_event(dec_name, "ENTER", func.__name__, f"[CATCHING={[e.__name__ for e in exceptions]}]")
                 
-                with with_nesting_level():
-                    try:
-                        return await func(*args, **kwargs)
-                    except exceptions as e:
-                        if log_error:
-                            log_event(
-                                dec_name, "CAUGHT", func.__name__,
-                                f"{type(e).__name__}: {e} -> DEFAULT={default}",
-                                level=logging.ERROR
-                            )
-                        
-                        if reraise:
-                            log_event(dec_name, "RERAISE", func.__name__, level=logging.WARNING)
-                            raise
-                        
-                        return default
+                exception_occurred = False
+                caught_exception = False
                 
-                log_event(dec_name, "EXIT", func.__name__)
+                try:
+                    with with_nesting_level():
+                        try:
+                            result = await func(*args, **kwargs)
+                            return result
+                        except exceptions as e:
+                            caught_exception = True
+                            if log_error:
+                                log_event(
+                                    dec_name, "CAUGHT", func.__name__,
+                                    f"{type(e).__name__}: {e} -> DEFAULT={default}",
+                                    level=logging.ERROR
+                                )
+                            
+                            if reraise:
+                                log_event(dec_name, "RERAISE", func.__name__, level=logging.WARNING)
+                                exception_occurred = True
+                                raise
+                            
+                            return default
+                        except Exception:
+                            exception_occurred = True
+                            raise
+                finally:
+                    if caught_exception and not reraise:
+                        log_event(dec_name, "EXIT", func.__name__, f"[RETURNED_DEFAULT={default}]", level=logging.INFO)
+                    elif exception_occurred:
+                        log_event(dec_name, "EXCEPTION", func.__name__, level=logging.ERROR)
+                    else:
+                        log_event(dec_name, "EXIT", func.__name__, level=logging.INFO)
             
             return async_wrapper
         
@@ -277,24 +321,39 @@ def catch(exceptions: Tuple[Type[Exception], ...] = (Exception,),
                 
                 log_event(dec_name, "ENTER", func.__name__, f"[CATCHING={[e.__name__ for e in exceptions]}]")
                 
-                with with_nesting_level():
-                    try:
-                        return func(*args, **kwargs)
-                    except exceptions as e:
-                        if log_error:
-                            log_event(
-                                dec_name, "CAUGHT", func.__name__,
-                                f"{type(e).__name__}: {e} -> DEFAULT={default}",
-                                level=logging.ERROR
-                            )
-                        
-                        if reraise:
-                            log_event(dec_name, "RERAISE", func.__name__, level=logging.WARNING)
-                            raise
-                        
-                        return default
+                exception_occurred = False
+                caught_exception = False
                 
-                log_event(dec_name, "EXIT", func.__name__)
+                try:
+                    with with_nesting_level():
+                        try:
+                            result = func(*args, **kwargs)
+                            return result
+                        except exceptions as e:
+                            caught_exception = True
+                            if log_error:
+                                log_event(
+                                    dec_name, "CAUGHT", func.__name__,
+                                    f"{type(e).__name__}: {e} -> DEFAULT={default}",
+                                    level=logging.ERROR
+                                )
+                            
+                            if reraise:
+                                log_event(dec_name, "RERAISE", func.__name__, level=logging.WARNING)
+                                exception_occurred = True
+                                raise
+                            
+                            return default
+                        except Exception:
+                            exception_occurred = True
+                            raise
+                finally:
+                    if caught_exception and not reraise:
+                        log_event(dec_name, "EXIT", func.__name__, f"[RETURNED_DEFAULT={default}]", level=logging.INFO)
+                    elif exception_occurred:
+                        log_event(dec_name, "EXCEPTION", func.__name__, level=logging.ERROR)
+                    else:
+                        log_event(dec_name, "EXIT", func.__name__, level=logging.INFO)
             
             return wrapper
     
@@ -317,6 +376,7 @@ def rate_limit(max_calls: int = 10,
     
     def decorator(func: Callable) -> Callable:
         func_id = id(func)
+        is_async = is_async_func(func)
         
         if func_id not in rate_limit_states:
             rate_limit_states[func_id] = RateLimitState(
@@ -324,82 +384,101 @@ def rate_limit(max_calls: int = 10,
                 time_window=time_window
             )
         
+        state = rate_limit_states[func_id]
+        lock = state.get_lock(is_async)
         mode_str = "WAIT" if wait else "REJECT"
         
-        if is_async_func(func):
+        if is_async:
             @functools.wraps(func)
             async def async_wrapper(*args, **kwargs) -> Any:
                 if not global_chain_id.get():
                     global_chain_id.set(generate_chain_id())
                 
-                state = rate_limit_states[func_id]
                 current_time = time.time()
+                allowed_to_proceed = False
+                current_count = 0
                 
-                state.calls = [t for t in state.calls if current_time - t < state.time_window]
-                current_count = len(state.calls)
-                
-                log_event(
-                    dec_name, "CHECK", func.__name__,
-                    f"[CURRENT={current_count}/{state.max_calls} WINDOW={state.time_window}s MODE={mode_str}]"
-                )
-                
-                if current_count >= state.max_calls:
-                    if wait:
-                        oldest_call = state.calls[0]
-                        wait_time = state.time_window - (current_time - oldest_call)
-                        
-                        if wait_time > 0:
+                async with lock:
+                    state.calls = [t for t in state.calls if current_time - t < state.time_window]
+                    current_count = len(state.calls)
+                    
+                    log_event(
+                        dec_name, "CHECK", func.__name__,
+                        f"[CURRENT={current_count}/{state.max_calls} WINDOW={state.time_window}s MODE={mode_str}]"
+                    )
+                    
+                    if current_count >= state.max_calls:
+                        if wait:
+                            oldest_call = state.calls[0]
+                            wait_time = state.time_window - (current_time - oldest_call)
+                            
+                            if wait_time > 0:
+                                log_event(
+                                    dec_name, "LIMITED", func.__name__,
+                                    f"[THROTTLED] Need to wait {wait_time:.3f}s for next slot...",
+                                    level=logging.WARNING
+                                )
+                                log_event(
+                                    dec_name, "WAITING", func.__name__,
+                                    f"[SLEEP_START] wait_time={wait_time:.3f}s",
+                                    level=logging.WARNING
+                                )
+                                
+                                await asyncio.sleep(wait_time)
+                                
+                                current_time = time.time()
+                                state.calls = [t for t in state.calls if current_time - t < state.time_window]
+                                
+                                log_event(
+                                    dec_name, "RELEASED", func.__name__,
+                                    f"[SLEEP_END] Waited {wait_time:.3f}s, now allowed to proceed",
+                                    level=logging.INFO
+                                )
+                                
+                                state.calls.append(current_time)
+                                remaining = max(0, state.max_calls - len(state.calls))
+                                log_event(
+                                    dec_name, "ALLOWED", func.__name__,
+                                    f"[PROCEED] Used: {len(state.calls)}/{state.max_calls}, Remaining: {remaining}/{state.max_calls}"
+                                )
+                                allowed_to_proceed = True
+                        else:
+                            if on_limit is not None:
+                                log_event(
+                                    dec_name, "LIMITED", func.__name__,
+                                    f"[REJECTED] Calling on_limit callback",
+                                    level=logging.WARNING
+                                )
+                                if is_async_func(on_limit):
+                                    return await on_limit(*args, **kwargs)
+                                else:
+                                    return on_limit(*args, **kwargs)
+                            
                             log_event(
                                 dec_name, "LIMITED", func.__name__,
-                                f"[THROTTLED] Need to wait {wait_time:.3f}s for next slot...",
+                                f"[REJECTED] Exceeded {state.max_calls}/{state.time_window}s - Raising RateLimitExceededError",
                                 level=logging.WARNING
                             )
-                            log_event(
-                                dec_name, "WAITING", func.__name__,
-                                f"[SLEEP_START] wait_time={wait_time:.3f}s",
-                                level=logging.WARNING
-                            )
-                            
-                            await asyncio.sleep(wait_time)
-                            
-                            current_time = time.time()
-                            state.calls = [t for t in state.calls if current_time - t < state.time_window]
-                            
-                            log_event(
-                                dec_name, "RELEASED", func.__name__,
-                                f"[SLEEP_END] Waited {wait_time:.3f}s, now allowed to proceed",
-                                level=logging.INFO
+                            raise RateLimitExceededError(
+                                f"Function '{func.__name__}' exceeded rate limit: "
+                                f"{state.max_calls} calls per {state.time_window} seconds"
                             )
                     else:
-                        if on_limit is not None:
-                            log_event(
-                                dec_name, "LIMITED", func.__name__,
-                                f"[REJECTED] Calling on_limit callback",
-                                level=logging.WARNING
-                            )
-                            if is_async_func(on_limit):
-                                return await on_limit(*args, **kwargs)
-                            else:
-                                return on_limit(*args, **kwargs)
-                        
+                        state.calls.append(current_time)
+                        remaining = max(0, state.max_calls - len(state.calls))
                         log_event(
-                            dec_name, "LIMITED", func.__name__,
-                            f"[REJECTED] Exceeded {state.max_calls}/{state.time_window}s - Raising RateLimitExceededError",
-                            level=logging.WARNING
+                            dec_name, "ALLOWED", func.__name__,
+                            f"[PROCEED] Used: {len(state.calls)}/{state.max_calls}, Remaining: {remaining}/{state.max_calls}"
                         )
-                        raise RateLimitExceededError(
-                            f"Function '{func.__name__}' exceeded rate limit: "
-                            f"{state.max_calls} calls per {state.time_window} seconds"
-                        )
+                        allowed_to_proceed = True
                 
-                state.calls.append(current_time)
-                log_event(
-                    dec_name, "ALLOWED", func.__name__,
-                    f"[PROCEED] Remaining quota: {state.max_calls - len(state.calls)}/{state.max_calls}"
-                )
-                
-                with with_nesting_level():
-                    return await func(*args, **kwargs)
+                if allowed_to_proceed:
+                    with with_nesting_level():
+                        return await func(*args, **kwargs)
+                else:
+                    raise RateLimitExceededError(
+                        f"Function '{func.__name__}' exceeded rate limit"
+                    )
             
             return async_wrapper
         
@@ -409,71 +488,87 @@ def rate_limit(max_calls: int = 10,
                 if not global_chain_id.get():
                     global_chain_id.set(generate_chain_id())
                 
-                state = rate_limit_states[func_id]
                 current_time = time.time()
+                allowed_to_proceed = False
                 
-                state.calls = [t for t in state.calls if current_time - t < state.time_window]
-                current_count = len(state.calls)
-                
-                log_event(
-                    dec_name, "CHECK", func.__name__,
-                    f"[CURRENT={current_count}/{state.max_calls} WINDOW={state.time_window}s MODE={mode_str}]"
-                )
-                
-                if current_count >= state.max_calls:
-                    if wait:
-                        oldest_call = state.calls[0]
-                        wait_time = state.time_window - (current_time - oldest_call)
-                        
-                        if wait_time > 0:
+                with lock:
+                    state.calls = [t for t in state.calls if current_time - t < state.time_window]
+                    current_count = len(state.calls)
+                    
+                    log_event(
+                        dec_name, "CHECK", func.__name__,
+                        f"[CURRENT={current_count}/{state.max_calls} WINDOW={state.time_window}s MODE={mode_str}]"
+                    )
+                    
+                    if current_count >= state.max_calls:
+                        if wait:
+                            oldest_call = state.calls[0]
+                            wait_time = state.time_window - (current_time - oldest_call)
+                            
+                            if wait_time > 0:
+                                log_event(
+                                    dec_name, "LIMITED", func.__name__,
+                                    f"[THROTTLED] Need to wait {wait_time:.3f}s for next slot...",
+                                    level=logging.WARNING
+                                )
+                                log_event(
+                                    dec_name, "WAITING", func.__name__,
+                                    f"[SLEEP_START] wait_time={wait_time:.3f}s",
+                                    level=logging.WARNING
+                                )
+                                
+                                time.sleep(wait_time)
+                                
+                                current_time = time.time()
+                                state.calls = [t for t in state.calls if current_time - t < state.time_window]
+                                
+                                log_event(
+                                    dec_name, "RELEASED", func.__name__,
+                                    f"[SLEEP_END] Waited {wait_time:.3f}s, now allowed to proceed",
+                                    level=logging.INFO
+                                )
+                                
+                                state.calls.append(current_time)
+                                remaining = max(0, state.max_calls - len(state.calls))
+                                log_event(
+                                    dec_name, "ALLOWED", func.__name__,
+                                    f"[PROCEED] Used: {len(state.calls)}/{state.max_calls}, Remaining: {remaining}/{state.max_calls}"
+                                )
+                                allowed_to_proceed = True
+                        else:
+                            if on_limit is not None:
+                                log_event(
+                                    dec_name, "LIMITED", func.__name__,
+                                    f"[REJECTED] Calling on_limit callback",
+                                    level=logging.WARNING
+                                )
+                                return on_limit(*args, **kwargs)
+                            
                             log_event(
                                 dec_name, "LIMITED", func.__name__,
-                                f"[THROTTLED] Need to wait {wait_time:.3f}s for next slot...",
+                                f"[REJECTED] Exceeded {state.max_calls}/{state.time_window}s - Raising RateLimitExceededError",
                                 level=logging.WARNING
                             )
-                            log_event(
-                                dec_name, "WAITING", func.__name__,
-                                f"[SLEEP_START] wait_time={wait_time:.3f}s",
-                                level=logging.WARNING
-                            )
-                            
-                            time.sleep(wait_time)
-                            
-                            current_time = time.time()
-                            state.calls = [t for t in state.calls if current_time - t < state.time_window]
-                            
-                            log_event(
-                                dec_name, "RELEASED", func.__name__,
-                                f"[SLEEP_END] Waited {wait_time:.3f}s, now allowed to proceed",
-                                level=logging.INFO
+                            raise RateLimitExceededError(
+                                f"Function '{func.__name__}' exceeded rate limit: "
+                                f"{state.max_calls} calls per {state.time_window} seconds"
                             )
                     else:
-                        if on_limit is not None:
-                            log_event(
-                                dec_name, "LIMITED", func.__name__,
-                                f"[REJECTED] Calling on_limit callback",
-                                level=logging.WARNING
-                            )
-                            return on_limit(*args, **kwargs)
-                        
+                        state.calls.append(current_time)
+                        remaining = max(0, state.max_calls - len(state.calls))
                         log_event(
-                            dec_name, "LIMITED", func.__name__,
-                            f"[REJECTED] Exceeded {state.max_calls}/{state.time_window}s - Raising RateLimitExceededError",
-                            level=logging.WARNING
+                            dec_name, "ALLOWED", func.__name__,
+                            f"[PROCEED] Used: {len(state.calls)}/{state.max_calls}, Remaining: {remaining}/{state.max_calls}"
                         )
-                        raise RateLimitExceededError(
-                            f"Function '{func.__name__}' exceeded rate limit: "
-                            f"{state.max_calls} calls per {state.time_window} seconds"
-                        )
+                        allowed_to_proceed = True
                 
-                state.calls.append(current_time)
-                log_event(
-                    dec_name, "ALLOWED", func.__name__,
-                    f"[PROCEED] Remaining quota: {state.max_calls - len(state.calls)}/{state.max_calls}"
-                )
-                
-                with with_nesting_level():
-                    return func(*args, **kwargs)
+                if allowed_to_proceed:
+                    with with_nesting_level():
+                        return func(*args, **kwargs)
+                else:
+                    raise RateLimitExceededError(
+                        f"Function '{func.__name__}' exceeded rate limit"
+                    )
             
             return wrapper
     
@@ -502,40 +597,45 @@ def retry(max_attempts: int = 3,
                 current_delay = delay
                 last_exception = None
                 
-                for attempt in range(1, max_attempts + 1):
-                    log_event(
-                        dec_name, "ATTEMPT", func.__name__,
-                        f"[{attempt}/{max_attempts}]"
-                    )
-                    
-                    with with_nesting_level():
-                        try:
-                            result = await func(*args, **kwargs)
-                            if attempt > 1:
-                                log_event(
-                                    dec_name, "SUCCESS", func.__name__,
-                                    f"[SUCCEEDED_ON={attempt}/{max_attempts}]",
-                                    level=logging.INFO
-                                )
-                            return result
-                        except exceptions as e:
-                            last_exception = e
-                            if attempt < max_attempts:
-                                log_event(
-                                    dec_name, "FAILED", func.__name__,
-                                    f"[ATTEMPT={attempt}/{max_attempts}] {type(e).__name__}: {e} -> RETRY_AFTER={current_delay:.2f}s",
-                                    level=logging.WARNING
-                                )
-                                await asyncio.sleep(current_delay)
-                                current_delay *= backoff
-                            else:
-                                log_event(
-                                    dec_name, "GAVE_UP", func.__name__,
-                                    f"[ALL_{max_attempts}_ATTEMPTS_FAILED] Last: {type(e).__name__}: {e}",
-                                    level=logging.ERROR
-                                )
+                log_event(dec_name, "ENTER", func.__name__, f"[MAX_ATTEMPTS={max_attempts}]")
                 
-                raise last_exception
+                try:
+                    for attempt in range(1, max_attempts + 1):
+                        log_event(
+                            dec_name, "ATTEMPT", func.__name__,
+                            f"[{attempt}/{max_attempts}]"
+                        )
+                        
+                        with with_nesting_level():
+                            try:
+                                result = await func(*args, **kwargs)
+                                if attempt > 1:
+                                    log_event(
+                                        dec_name, "SUCCESS", func.__name__,
+                                        f"[SUCCEEDED_ON={attempt}/{max_attempts}]",
+                                        level=logging.INFO
+                                    )
+                                return result
+                            except exceptions as e:
+                                last_exception = e
+                                if attempt < max_attempts:
+                                    log_event(
+                                        dec_name, "FAILED", func.__name__,
+                                        f"[ATTEMPT={attempt}/{max_attempts}] {type(e).__name__}: {e} -> RETRY_AFTER={current_delay:.2f}s",
+                                        level=logging.WARNING
+                                    )
+                                    await asyncio.sleep(current_delay)
+                                    current_delay *= backoff
+                                else:
+                                    log_event(
+                                        dec_name, "GAVE_UP", func.__name__,
+                                        f"[ALL_{max_attempts}_ATTEMPTS_FAILED] Last: {type(e).__name__}: {e}",
+                                        level=logging.ERROR
+                                    )
+                    
+                    raise last_exception
+                finally:
+                    log_event(dec_name, "EXIT", func.__name__)
             
             return async_wrapper
         
@@ -548,40 +648,45 @@ def retry(max_attempts: int = 3,
                 current_delay = delay
                 last_exception = None
                 
-                for attempt in range(1, max_attempts + 1):
-                    log_event(
-                        dec_name, "ATTEMPT", func.__name__,
-                        f"[{attempt}/{max_attempts}]"
-                    )
-                    
-                    with with_nesting_level():
-                        try:
-                            result = func(*args, **kwargs)
-                            if attempt > 1:
-                                log_event(
-                                    dec_name, "SUCCESS", func.__name__,
-                                    f"[SUCCEEDED_ON={attempt}/{max_attempts}]",
-                                    level=logging.INFO
-                                )
-                            return result
-                        except exceptions as e:
-                            last_exception = e
-                            if attempt < max_attempts:
-                                log_event(
-                                    dec_name, "FAILED", func.__name__,
-                                    f"[ATTEMPT={attempt}/{max_attempts}] {type(e).__name__}: {e} -> RETRY_AFTER={current_delay:.2f}s",
-                                    level=logging.WARNING
-                                )
-                                time.sleep(current_delay)
-                                current_delay *= backoff
-                            else:
-                                log_event(
-                                    dec_name, "GAVE_UP", func.__name__,
-                                    f"[ALL_{max_attempts}_ATTEMPTS_FAILED] Last: {type(e).__name__}: {e}",
-                                    level=logging.ERROR
-                                )
+                log_event(dec_name, "ENTER", func.__name__, f"[MAX_ATTEMPTS={max_attempts}]")
                 
-                raise last_exception
+                try:
+                    for attempt in range(1, max_attempts + 1):
+                        log_event(
+                            dec_name, "ATTEMPT", func.__name__,
+                            f"[{attempt}/{max_attempts}]"
+                        )
+                        
+                        with with_nesting_level():
+                            try:
+                                result = func(*args, **kwargs)
+                                if attempt > 1:
+                                    log_event(
+                                        dec_name, "SUCCESS", func.__name__,
+                                        f"[SUCCEEDED_ON={attempt}/{max_attempts}]",
+                                        level=logging.INFO
+                                    )
+                                return result
+                            except exceptions as e:
+                                last_exception = e
+                                if attempt < max_attempts:
+                                    log_event(
+                                        dec_name, "FAILED", func.__name__,
+                                        f"[ATTEMPT={attempt}/{max_attempts}] {type(e).__name__}: {e} -> RETRY_AFTER={current_delay:.2f}s",
+                                        level=logging.WARNING
+                                    )
+                                    time.sleep(current_delay)
+                                    current_delay *= backoff
+                                else:
+                                    log_event(
+                                        dec_name, "GAVE_UP", func.__name__,
+                                        f"[ALL_{max_attempts}_ATTEMPTS_FAILED] Last: {type(e).__name__}: {e}",
+                                        level=logging.ERROR
+                                    )
+                    
+                    raise last_exception
+                finally:
+                    log_event(dec_name, "EXIT", func.__name__)
             
             return wrapper
     
