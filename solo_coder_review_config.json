@@ -1,0 +1,81 @@
+{
+  "label": "solo coder评审",
+  "trigger_phrase": "solo coder 评审",
+  "how_to_use_in_any_project": [
+    "在对话开头或结尾加一句：按“solo coder 评审”输出",
+    "提供两类证据：1）本轮改动情况（改了哪些文件/关键改动点/是否包含无关产物）；2）CLI运行输出（完整日志/报错）",
+    "输出必须是可直接复制的纯文本，不要Markdown"
+  ],
+  "purpose": "基于本轮改动情况 + CLI运行输出给出评审解释、满意/不满意原因；若不满意则给下一轮prompt（不复制不满意原因原句）。",
+  "output_format": {
+    "requirements": [
+      "纯文本输出（不要Markdown/不要标题符号/不要代码块渲染格式）",
+      "所有段落必须可直接复制粘贴到问卷/备注/下一轮prompt",
+      "先给一段解释（说明发生了什么、为什么会这样）",
+      "再给结论：满意/不满意",
+      "若不满意：给出可直接复制的“不满意原因”（区分产物/过程）",
+      "若不满意：给出可直接复制的“下一轮prompt”（避免原句复用）"
+    ]
+  },
+  "review_flow": [
+    {
+      "step": "collect_evidence",
+      "content": [
+        "说明本轮改动情况（改了哪些文件、关键改动点、是否带了无关产物如__pycache__/pyc）",
+        "粘贴CLI输出（demo.py/async_demo.py运行结果，含关键日志片段）",
+        "如有报错：保留完整Trace/异常类型/关键日志片段"
+      ]
+    },
+    {
+      "step": "interpretation",
+      "content": [
+        "解释输出中关键现象（例如：元信息对比为何失败、限流为何等待、为何出现异常）",
+        "强调哪些是“验证方法问题” vs “功能实现问题”"
+      ]
+    },
+    {
+      "step": "verdict",
+      "content": [
+        "给出：满意/不满意",
+        "判定口径：只要存在产物不满意 => 下一轮；仅过程不满意 => 可不跑下一轮"
+      ]
+    },
+    {
+      "step": "reasons",
+      "content": [
+        "不满意原因必须与对话/输出证据一致（避免漏写导致质检作废）",
+        "不满意原因不要写成模板化空话；要写具体可复核点"
+      ]
+    },
+    {
+      "step": "next_prompt_if_needed",
+      "content": [
+        "下一轮prompt要覆盖上一轮不满意点的修复目标",
+        "禁止把不满意原因原句直接复制进下一轮prompt（需改写为真实用户的请求表达）",
+        "避免让模型写长篇原理讲解；以可运行、可验证输出为主"
+      ]
+    }
+  ],
+  "common_checks": {
+    "wraps_validation": [
+      "对比对象必须是“同一个函数装饰前后”，否则__name__不一致会误判",
+      "至少验证：__name__、__doc__、inspect.signature",
+      "异步函数额外验证：inspect.iscoroutinefunction一致"
+    ],
+    "onion_order_validation": [
+      "ENTER/EXIT事件必须在正常与异常路径都能打印",
+      "日志需包含同一CHAIN_ID贯穿调用链，且缩进能反映嵌套层级",
+      "若缺少log/catch的EXIT，则无法证明退出顺序（洋葱模型）"
+    ],
+    "rate_limit_validation": [
+      "REJECT：超过阈值直接拒绝（异常或回调）",
+      "WAIT：必须能看到LIMITED/WAITING/RELEASED/ALLOWED完整序列，并体现等待时长",
+      "并发场景注意配额剩余值不应出现负数（若出现需作为缺陷记录）"
+    ],
+    "demo_reliability": [
+      "避免未定义变量导致演示失败（例如NameError）",
+      "输出总结必须与实际日志证据一致（避免“总结说通过但日志不支持”）"
+    ]
+  }
+}
+

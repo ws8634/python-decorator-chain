@@ -3,6 +3,10 @@ import functools
 import inspect
 
 
+def is_async_func(func: Callable) -> bool:
+    return inspect.iscoroutinefunction(func) or inspect.isasyncgenfunction(func)
+
+
 class DecoratorChain:
     def __init__(self, *decorators: Callable):
         self._decorators: List[Tuple[Callable, Tuple, Dict]] = []
@@ -79,7 +83,17 @@ class DecoratorChain:
         return len(self._decorators)
     
     def __repr__(self) -> str:
-        dec_names = [dec.__name__ for dec, _, _ in self._decorators]
+        dec_names = []
+        for dec, args, kwargs in self._decorators:
+            name = getattr(dec, '__name__', str(dec))
+            if args or kwargs:
+                params = []
+                if args:
+                    params.extend(str(a) for a in args)
+                if kwargs:
+                    params.extend(f"{k}={v}" for k, v in kwargs.items())
+                name = f"{name}({', '.join(params)})"
+            dec_names.append(name)
         return f"DecoratorChain({', '.join(dec_names)})"
 
 
@@ -93,71 +107,6 @@ class ChainBuilder:
         chain = DecoratorChain()
         for decorator, args, kwargs in decorators:
             chain.add(decorator, *args, **kwargs)
-        return chain
-    
-    @staticmethod
-    def from_config(config: Any) -> DecoratorChain:
-        from decorators import log, timer, catch, rate_limit, retry, monitor
-        
-        chain = DecoratorChain()
-        
-        if hasattr(config, 'log') and config.log and config.log.enabled:
-            chain.add(
-                log,
-                level=config.log.level,
-                log_args=config.log.log_args,
-                log_return=config.log.log_return,
-                log_time=config.log.log_time,
-                log_context=getattr(config.log, 'log_context', True)
-            )
-        
-        if hasattr(config, 'timer') and config.timer and config.timer.enabled:
-            chain.add(
-                timer,
-                unit=config.timer.unit,
-                precision=config.timer.precision,
-                log_level=config.timer.log_level
-            )
-        
-        if hasattr(config, 'catch') and config.catch and config.catch.enabled:
-            chain.add(
-                catch,
-                exceptions=config.catch.exceptions,
-                default=config.catch.default,
-                reraise=config.catch.reraise,
-                log_error=config.catch.log_error
-            )
-        
-        if hasattr(config, 'rate_limit') and config.rate_limit and config.rate_limit.enabled:
-            chain.add(
-                rate_limit,
-                max_calls=config.rate_limit.max_calls,
-                time_window=config.rate_limit.time_window,
-                wait=config.rate_limit.wait,
-                thread_safe=getattr(config.rate_limit, 'thread_safe', True),
-                process_safe=getattr(config.rate_limit, 'process_safe', False)
-            )
-        
-        if hasattr(config, 'retry') and config.retry and config.retry.enabled:
-            chain.add(
-                retry,
-                max_attempts=config.retry.max_attempts,
-                delay=config.retry.delay,
-                backoff=config.retry.backoff,
-                exceptions=config.retry.exceptions
-            )
-        
-        if hasattr(config, 'monitor') and config.monitor and config.monitor.enabled:
-            chain.add(
-                monitor,
-                name=config.monitor.name,
-                track_calls=config.monitor.track_calls,
-                track_errors=config.monitor.track_errors,
-                track_latency=config.monitor.track_latency,
-                track_exceptions=config.monitor.track_exceptions,
-                histogram_bins=config.monitor.histogram_bins
-            )
-        
         return chain
 
 
@@ -176,7 +125,7 @@ class DecoratorPresets:
         from decorators import log, timer
         return DecoratorChain(
             timer(unit="ms", precision=4),
-            log(level="INFO", log_args=True, log_return=True, log_time=True, log_context=True)
+            log(level="INFO", log_args=True, log_return=True, log_time=True)
         )
     
     @staticmethod
@@ -189,16 +138,12 @@ class DecoratorPresets:
         )
     
     @staticmethod
-    def api_chain(max_calls: int = 100, 
-                  time_window: float = 60.0,
-                  thread_safe: bool = True,
-                  process_safe: bool = False) -> DecoratorChain:
+    def api_chain(max_calls: int = 100, time_window: float = 60.0, mode: str = "reject") -> DecoratorChain:
         from decorators import log, timer, catch, rate_limit
         return DecoratorChain(
             timer(unit="ms", precision=3),
             catch(exceptions=(Exception,), default={"error": "Internal Server Error"}, log_error=True),
-            rate_limit(max_calls=max_calls, time_window=time_window, 
-                       thread_safe=thread_safe, process_safe=process_safe),
+            rate_limit(max_calls=max_calls, time_window=time_window, mode=mode),
             log(level="INFO", log_args=True, log_return=True)
         )
     
@@ -215,44 +160,16 @@ class DecoratorPresets:
         )
     
     @staticmethod
-    def monitored_chain(monitor_name: Optional[str] = None) -> DecoratorChain:
-        from decorators import log, timer, monitor
-        chain = DecoratorChain(
-            timer(unit="ms", precision=3),
-            monitor(name=monitor_name),
-            log(level="INFO", log_args=False, log_return=False)
-        )
-        return chain
-    
-    @staticmethod
-    def full_enterprise_chain(max_calls: int = 100,
-                               time_window: float = 60.0,
-                               max_attempts: int = 3,
-                               monitor_name: Optional[str] = None,
-                               thread_safe: bool = True,
-                               process_safe: bool = False) -> DecoratorChain:
-        from decorators import log, timer, catch, rate_limit, retry, monitor
-        
+    def full_chain(max_calls: int = 10, 
+                   time_window: float = 60.0,
+                   rate_mode: str = "reject",
+                   retry_max: int = 3,
+                   retry_delay: float = 0.5) -> DecoratorChain:
+        from decorators import log, timer, catch, rate_limit, retry
         return DecoratorChain(
             timer(unit="ms", precision=3),
-            catch(exceptions=(Exception,), default={"error": "Service Unavailable"}, log_error=True),
-            rate_limit(max_calls=max_calls, time_window=time_window,
-                       thread_safe=thread_safe, process_safe=process_safe),
-            retry(max_attempts=max_attempts, delay=0.5, backoff=1.5),
-            monitor(name=monitor_name),
-            log(level="INFO", log_args=True, log_return=True, log_context=True)
-        )
-    
-    @staticmethod
-    def async_api_chain(max_calls: int = 100,
-                        time_window: float = 60.0,
-                        thread_safe: bool = True) -> DecoratorChain:
-        from decorators import log, timer, catch, rate_limit, monitor
-        
-        return DecoratorChain(
-            timer(unit="ms", precision=3),
-            catch(exceptions=(Exception,), default={"error": "Async API Error"}, log_error=True),
-            rate_limit(max_calls=max_calls, time_window=time_window, thread_safe=thread_safe),
-            monitor(name="async_api"),
-            log(level="INFO", log_context=True)
+            catch(exceptions=(Exception,), default=None, log_error=True),
+            rate_limit(max_calls=max_calls, time_window=time_window, mode=rate_mode),
+            retry(max_attempts=retry_max, delay=retry_delay, backoff=1.5),
+            log(level="INFO", log_args=True, log_return=True, log_time=True)
         )

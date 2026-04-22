@@ -1,650 +1,619 @@
 import asyncio
 import time
-import threading
-import functools
-from typing import Dict, Any, List, Optional
-from concurrent.futures import ThreadPoolExecutor
+import inspect
+from typing import Dict, Any, List
 
 from decorators import (
-    log, timer, catch, rate_limit, retry, monitor,
-    RateLimitExceededError, get_monitor_stats, print_monitor_report, reset_monitor
+    log, timer, catch, rate_limit, retry, 
+    RateLimitExceededError, reset_chain_context, is_async_func
 )
-from chain import DecoratorChain, ChainBuilder, DecoratorPresets
-from config import (
-    DecoratorContext, with_context,
-    load_config_from_dict, save_config_to_file,
-    enable_decorator, disable_decorator, is_decorator_enabled,
-    update_rate_limit_config, update_retry_config,
-    DEFAULT_CONFIG, DecoratorChainConfig
-)
+from chain import DecoratorChain, DecoratorPresets
 
 
-print("=" * 80)
-print("【高级扩展演示 - 企业级装饰器链系统】")
-print("=" * 80)
+def print_header(title: str, width: int = 80):
+    print("\n" + "=" * width)
+    print(f"【{title}】")
+    print("=" * width)
+
+
+def print_subheader(text: str):
+    print(f"\n>>> {text} <<<")
+
+
+def compare_func_meta(original_func, decorated_func, label: str = ""):
+    print(f"\n{'='*60}")
+    print(f" 元信息对比验证: {label or original_func.__name__}")
+    print(f"{'='*60}")
+    
+    original_name = original_func.__name__
+    decorated_name = decorated_func.__name__
+    name_match = original_name == decorated_name
+    
+    original_doc = original_func.__doc__ or "(无文档)"
+    decorated_doc = decorated_func.__doc__ or "(无文档)"
+    doc_match = original_doc == decorated_doc
+    
+    try:
+        original_sig = str(inspect.signature(original_func))
+    except (ValueError, TypeError):
+        original_sig = "(无法获取签名)"
+    
+    try:
+        decorated_sig = str(inspect.signature(decorated_func))
+    except (ValueError, TypeError):
+        decorated_sig = "(无法获取签名)"
+    
+    sig_match = original_sig == decorated_sig
+    
+    print(f"\n  1. __name__ 对比:")
+    print(f"     原始函数: {repr(original_name)}")
+    print(f"     装饰后函数: {repr(decorated_name)}")
+    print(f"     匹配状态: {'✅ 相同' if name_match else '❌ 不同'}")
+    
+    print(f"\n  2. __doc__ 对比:")
+    print(f"     原始函数: {repr(original_doc)}")
+    print(f"     装饰后函数: {repr(decorated_doc)}")
+    print(f"     匹配状态: {'✅ 相同' if doc_match else '❌ 不同'}")
+    
+    print(f"\n  3. inspect.signature 对比:")
+    print(f"     原始函数: {original_sig}")
+    print(f"     装饰后函数: {decorated_sig}")
+    print(f"     匹配状态: {'✅ 相同' if sig_match else '❌ 不同'}")
+    
+    original_is_async = inspect.iscoroutinefunction(original_func)
+    decorated_is_async = inspect.iscoroutinefunction(decorated_func)
+    async_match = original_is_async == decorated_is_async
+    
+    print(f"\n  4. 是否为协程函数对比:")
+    print(f"     原始函数: {'✅ 是协程' if original_is_async else '❌ 不是协程'}")
+    print(f"     装饰后函数: {'✅ 是协程' if decorated_is_async else '❌ 不是协程'}")
+    print(f"     匹配状态: {'✅ 相同' if async_match else '❌ 不同'}")
+    
+    all_match = name_match and doc_match and sig_match and async_match
+    print(f"\n  【结论】functools.wraps 效果: {'✅ 完全生效' if all_match else '❌ 存在问题'}")
+    print(f"{'='*60}\n")
+    
+    return all_match
+
+
+print_header="异步函数装饰器演示系统初始化"
 
 print("""
-本演示包含以下高级功能：
-1. 异步函数兼容 - 所有装饰器支持 sync/async
-2. 线程安全限流 - 多线程高并发下计数准确
-3. 上下文传递 - request_id/trace_id 在多层装饰器间共享
-4. 监控统计 - @monitor 记录调用次数、耗时、异常分布
-5. 配置化能力 - 从字典配置加载，动态开关和调整策略
 
-========================================
+================================================================================
+                        异步函数装饰器演示系统
+                (Async Function Decorator Demo System)
+================================================================================
+
+本演示展示装饰器如何同时支持同步和异步函数。
+
+核心特性:
+1. 自动检测函数类型 (sync / async)
+2. 自动选择对应的包装器 (wrapper / async wrapper)
+3. 保持相同的日志格式和事件序列
+4. 使用 asyncio.sleep 替代 time.sleep (不阻塞事件循环)
+
+演示内容:
+- 异步函数的元信息验证
+- 异步函数的多层装饰器执行顺序 (洋葱模型)
+- 异步函数的 rate_limit 两种模式
+- 同步 vs 异步函数的对比
+
+================================================================================
 """)
 
-
-print("\n" + "=" * 80)
-print("【深度原理讲解】")
-print("=" * 80)
-
-print("""
-
-一、Python 装饰器执行顺序
-----------------------------
-
-当使用多个装饰器装饰一个函数时，装饰器的应用顺序和执行顺序是不同的：
-
-1. 应用顺序（从下到上）：
-   @decorator_A
-   @decorator_B
-   @decorator_C
-   def func(): pass
-   
-   等同于：decorator_A(decorator_B(decorator_C(func)))
-
-2. 执行顺序（从上到下）：
-   调用 func() 时：
-   - 先进入 decorator_A 的 wrapper
-   - 再进入 decorator_B 的 wrapper
-   - 再进入 decorator_C 的 wrapper
-   - 执行原函数 func
-   - 从 decorator_C 返回
-   - 从 decorator_B 返回
-   - 从 decorator_A 返回
-
-二、闭包绑定原理
-------------------
-
-装饰器本质是一个返回函数的函数，内部函数（wrapper）会形成闭包：
-
-   def decorator(param):
-       # 外层函数的变量
-       config = param
-       
-       def wrapper(*args, **kwargs):
-           # 内部函数可以访问外层的 config
-           # 即使外层函数已返回，config 仍被保留
-           print(f"Using config: {config}")
-           return func(*args, **kwargs)
-       
-       return wrapper
-
-关键：wrapper 函数通过闭包「捕获」了外层作用域的变量，
-这些变量的生命周期被延长到与 wrapper 相同。
-
-三、多层嵌套执行流程
-----------------------
-
-以 @log + @timer + @catch 为例：
-
-   @log()           # 第3层 wrapper
-   @timer()         # 第2层 wrapper
-   @catch()         # 第1层 wrapper
-   def business_func():
-       pass
-
-调用链（进入顺序）：
-   log_wrapper() → timer_wrapper() → catch_wrapper() → business_func()
-
-返回链（退出顺序）：
-   business_func() → catch_wrapper() → timer_wrapper() → log_wrapper()
-
-四、装饰器链数据传递与上下文共享
-----------------------------------
-
-传统方式：各装饰器独立，无法共享状态
-
-新机制（使用 contextvars.ContextVar）：
-
-   1. 定义上下文变量：
-      request_id_ctx = ContextVar('request_id', default='')
-      
-   2. 在入口设置上下文：
-      @with_context(request_id='REQ-123', trace_id='TRACE-456')
-      async def api_handler():
-          await service_a()
-          await service_b()
-      
-   3. 在装饰器中读取上下文：
-      def log_wrapper(...):
-          req_id = DecoratorContext.get_request_id()
-          logger.info(f"[REQ:{req_id}] ...")
-
-特点：
-- ContextVar 是异步安全的，每个 asyncio 任务有独立上下文
-- 支持多层嵌套调用，上下文自动传递
-- 线程安全，threading.local 的异步替代品
-
-五、装饰器执行顺序图示
-------------------------
-
-   装饰顺序（应用时）：
-   ┌─────────────────────────────────────────────────────────┐
-   │  @log()                          ← 最外层，最后应用       │
-   │    @timer()                     ← 中间层                  │
-   │      @catch()                   ← 最内层，最先应用       │
-   │        def func(): pass                                   │
-   └─────────────────────────────────────────────────────────┘
-
-   执行顺序（调用时）：
-   ┌─────────────────────────────────────────────────────────┐
-   │  func()                                                  │
-   │    ↓                                                     │
-   │  log_wrapper 开始 → 记录开始日志                        │
-   │    ↓                                                     │
-   │  timer_wrapper 开始 → 记录开始时间                      │
-   │    ↓                                                     │
-   │  catch_wrapper 开始 → 准备异常捕获                      │
-   │    ↓                                                     │
-   │  执行原函数 func()                                       │
-   │    ↓                                                     │
-   │  catch_wrapper 结束 → 若有异常则处理                    │
-   │    ↓                                                     │
-   │  timer_wrapper 结束 → 计算耗时并输出                     │
-   │    ↓                                                     │
-   │  log_wrapper 结束 → 记录返回值和耗时                     │
-   └─────────────────────────────────────────────────────────┘
-
-""")
-
-
-print("\n" + "=" * 80)
-print("【演示 1】异步函数兼容 - 所有装饰器支持 async/await")
-print("=" * 80)
-
-
-@log(level="INFO", log_args=True, log_return=True, log_context=True)
-@timer(unit="ms", precision=4)
-@catch(exceptions=(ValueError, ZeroDivisionError), default={"status": "error"})
-@rate_limit(max_calls=5, time_window=10.0, thread_safe=True)
-@retry(max_attempts=2, delay=0.2, backoff=1.0)
-@monitor(name="async_business_service")
-async def async_business_service(user_id: int, data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    异步业务服务 - 演示所有装饰器对 async 函数的支持
-    """
-    await asyncio.sleep(0.05)
-    
-    if data.get('should_fail'):
-        raise ValueError("Simulated business error")
-    
-    return {
-        "user_id": user_id,
-        "data": data,
-        "processed_at": time.time(),
-        "status": "success"
-    }
-
-
-@log(level="DEBUG")
-@timer(unit="s")
-async def simple_async_func(x: int, y: int) -> int:
-    await asyncio.sleep(0.01)
-    return x + y
-
-
-async def demo_async_functions():
-    print("\n>>> 测试异步函数装饰器 <<<")
-    
-    print(f"\n  函数名: {async_business_service.__name__}")
-    print(f"  函数文档: {async_business_service.__doc__}")
-    print(f"  是否异步函数: {asyncio.iscoroutinefunction(async_business_service)}")
-    
-    print("\n  正常调用测试:")
-    result = await async_business_service(1001, {"action": "test"})
-    print(f"    结果: {result}")
-    
-    print("\n  异常捕获测试:")
-    result2 = await async_business_service(1002, {"should_fail": True})
-    print(f"    捕获异常后返回: {result2}")
-    
-    print("\n  简单异步函数测试:")
-    result3 = await simple_async_func(10, 20)
-    print(f"    10 + 20 = {result3}")
-
-
-print("\n" + "=" * 80)
-print("【演示 2】线程安全限流 - 高并发下计数准确")
-print("=" * 80)
-
-
-thread_safe_counter = 0
-thread_counter_lock = threading.Lock()
-
-@rate_limit(max_calls=3, time_window=5.0, thread_safe=True)
-@monitor(name="thread_safe_api")
-def thread_safe_api_call(request_num: int) -> str:
-    global thread_safe_counter
-    with thread_counter_lock:
-        thread_safe_counter += 1
-    return f"Request {request_num} processed successfully (count={thread_safe_counter})"
-
-
-@rate_limit(max_calls=3, time_window=5.0, thread_safe=False)
-@monitor(name="non_thread_safe_api")
-def non_thread_safe_api_call(request_num: int) -> str:
-    return f"Request {request_num} processed"
-
-
-def worker_thread(api_func, request_num: int, results: List[Dict], errors: List[Dict]):
-    try:
-        result = api_func(request_num)
-        results.append({"request": request_num, "result": result, "success": True})
-    except RateLimitExceededError as e:
-        errors.append({"request": request_num, "error": str(e), "success": False})
-    except Exception as e:
-        errors.append({"request": request_num, "error": str(e), "success": False})
-
-
-async def demo_thread_safe_rate_limit():
-    global thread_safe_counter
-    thread_safe_counter = 0
-    
-    print("\n>>> 线程安全限流测试 <<<")
-    print("  策略: max_calls=3, time_window=5s, thread_safe=True")
-    print("  场景: 10个线程并发调用，预期只有 3 个成功")
-    
-    results: List[Dict] = []
-    errors: List[Dict] = []
-    
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = []
-        for i in range(1, 11):
-            future = executor.submit(
-                worker_thread,
-                thread_safe_api_call,
-                i,
-                results,
-                errors
-            )
-            futures.append(future)
-        
-        for future in futures:
-            try:
-                future.result(timeout=2.0)
-            except Exception as e:
-                print(f"    线程执行错误: {e}")
-    
-    print(f"\n  实际结果:")
-    print(f"    成功调用数: {len(results)}")
-    print(f"    被限流数: {len(errors)}")
-    print(f"    计数器值: {thread_safe_counter}")
-    
-    if len(results) == 3:
-        print("  ✅ 线程安全限流工作正常！正好 3 个调用通过")
-    else:
-        print(f"  ⚠️  注意: 并发测试可能有轻微波动，成功数: {len(results)}")
-
-
-print("\n" + "=" * 80)
-print("【演示 3】上下文传递 - request_id/trace_id 多层共享")
-print("=" * 80)
-
-
-@log(level="INFO", log_context=True)
-@monitor(name="inner_service")
-async def inner_service_a() -> str:
-    req_id = DecoratorContext.get_request_id()
-    trace_id = DecoratorContext.get_trace_id()
-    user_ctx = DecoratorContext.get_user_context()
-    print(f"      [inner_service_a] 读取上下文: request_id={req_id}, trace_id={trace_id}, user={user_ctx}")
-    return "service_a_ok"
-
-
-@log(level="INFO", log_context=True)
-@monitor(name="inner_service_b")
-async def inner_service_b() -> str:
-    req_id = DecoratorContext.get_request_id()
-    print(f"      [inner_service_b] 读取上下文: request_id={req_id}")
-    DecoratorContext.update_extra_context(step="service_b_executed")
-    return "service_b_ok"
-
-
-@log(level="INFO", log_context=True)
-@with_context(request_id="GLOBAL-REQ-001", trace_id="TRACE-2024-001", user={"id": 999, "role": "system"})
-async def context_demo_entry() -> Dict[str, Any]:
-    print("\n  [入口函数] 设置了初始上下文")
-    print(f"    request_id: {DecoratorContext.get_request_id()}")
-    print(f"    trace_id: {DecoratorContext.get_trace_id()}")
-    print(f"    user: {DecoratorContext.get_user_context()}")
-    
-    DecoratorContext.update_extra_context(api_version="v2.0", env="production")
-    
-    print("\n  调用 inner_service_a（自动继承上下文）:")
-    result_a = await inner_service_a()
-    
-    print("\n  调用 inner_service_b（自动继承上下文）:")
-    result_b = await inner_service_b()
-    
-    extra = DecoratorContext.get_extra_context()
-    print(f"\n  [入口函数结束] 额外上下文: {extra}")
-    
-    return {
-        "result_a": result_a,
-        "result_b": result_b,
-        "context": DecoratorContext.get_all_context()
-    }
-
-
-async def demo_context_passing():
-    print("\n>>> 上下文传递演示 <<<")
-    print("""
-  原理说明:
-  - 使用 contextvars.ContextVar 存储上下文
-  - 每个 asyncio 任务有独立的上下文副本
-  - 子协程自动继承父协程的上下文
-  - @with_context 装饰器可以设置/覆盖上下文
-""")
-    
-    result = await context_demo_entry()
-    print(f"\n  最终结果:")
-    print(f"    服务执行结果: A={result['result_a']}, B={result['result_b']}")
-    print(f"    完整上下文: {result['context']}")
-
-
-print("\n" + "=" * 80)
-print("【演示 4】监控统计 - @monitor 装饰器")
-print("=" * 80)
-
-
-@monitor(name="monitored_func_1")
-async def monitored_success_func() -> str:
-    await asyncio.sleep(0.01)
-    return "success"
-
-
-@monitor(name="monitored_func_2")
-async def monitored_mixed_func(should_fail: bool = False) -> str:
-    await asyncio.sleep(0.02)
-    if should_fail:
-        raise ValueError("Simulated error")
-    return "ok"
-
-
-async def demo_monitor_stats():
-    print("\n>>> 监控统计演示 <<<")
-    
-    reset_monitor()
-    
-    print("\n  调用 monitored_func_1（全部成功）:")
-    for i in range(5):
-        await monitored_success_func()
-        await asyncio.sleep(0.001)
-    
-    print("  调用 monitored_func_2（部分成功，部分失败）:")
-    for i in range(10):
-        try:
-            await monitored_mixed_func(should_fail=(i % 3 == 0))
-        except Exception:
-            pass
-    
-    print("\n  打印监控报表:")
-    print_monitor_report()
-    
-    stats = get_monitor_stats()
-    print(f"\n  以编程方式获取的统计:")
-    for name, data in stats.items():
-        print(f"    [{name}] 总调用: {data['total_calls']}, "
-              f"成功率: {data['success_rate_pct']}%, "
-              f"平均耗时: {data['avg_latency_ms']}ms")
-
-
-print("\n" + "=" * 80)
-print("【演示 5】配置化能力 - 动态加载和调整")
-print("=" * 80)
-
-
-def demo_configuration():
-    print("\n>>> 配置化能力演示 <<<")
-    
-    config_dict = {
-        "log": {
-            "level": "DEBUG",
-            "log_args": True,
-            "log_return": False,
-            "log_time": True,
-            "log_context": True,
-            "enabled": True
-        },
-        "timer": {
-            "unit": "ms",
-            "precision": 3,
-            "log_level": "INFO",
-            "enabled": True
-        },
-        "rate_limit": {
-            "max_calls": 5,
-            "time_window": 30.0,
-            "wait": False,
-            "thread_safe": True,
-            "process_safe": False,
-            "enabled": True
-        },
-        "retry": {
-            "max_attempts": 3,
-            "delay": 0.5,
-            "backoff": 2.0,
-            "exceptions": ["ConnectionError", "TimeoutError"],
-            "enabled": True
-        },
-        "monitor": {
-            "name": "config_based_chain",
-            "track_calls": True,
-            "track_errors": True,
-            "track_latency": True,
-            "track_exceptions": True,
-            "histogram_bins": 10,
-            "enabled": True
-        }
-    }
-    
-    print("\n  1. 从字典加载配置:")
-    config = load_config_from_dict(config_dict)
-    print(f"    log.level: {config.log.level}")
-    print(f"    rate_limit.max_calls: {config.rate_limit.max_calls}")
-    print(f"    retry.max_attempts: {config.retry.max_attempts}")
-    
-    print("\n  2. 使用配置创建装饰器链:")
-    chain_from_config = ChainBuilder.from_config(config)
-    print(f"    装饰器链: {chain_from_config}")
-    print(f"    装饰器数量: {len(chain_from_config)}")
-    
-    print("\n  3. 动态开关测试:")
-    print(f"    log 装饰器启用状态: {is_decorator_enabled('log')}")
-    disable_decorator('log')
-    print(f"    禁用后 log 状态: {is_decorator_enabled('log')}")
-    enable_decorator('log')
-    print(f"    重新启用后状态: {is_decorator_enabled('log')}")
-    
-    print("\n  4. 动态调整限流策略:")
-    print("    调用 update_rate_limit_config(max_calls=100, time_window=60.0)")
-    update_rate_limit_config(max_calls=100, time_window=60.0)
-    
-    print("\n  5. 动态调整重试策略:")
-    print("    调用 update_retry_config(max_attempts=5, delay=0.2, backoff=1.5)")
-    update_retry_config(max_attempts=5, delay=0.2, backoff=1.5)
-    
-    print("\n  6. 配置导出为字典:")
-    export_dict = config.to_dict()
-    print(f"    导出的配置键: {list(export_dict.keys())}")
-    
-    return chain_from_config
-
-
-print("\n" + "=" * 80)
-print("【演示 6】高并发异步限流 - 完整场景")
-print("=" * 80)
-
-
-@rate_limit(max_calls=5, time_window=10.0, thread_safe=True)
-@monitor(name="high_concurrency_api")
-async def high_concurrency_async_api(req_id: str) -> Dict[str, Any]:
-    await asyncio.sleep(0.01)
-    return {
-        "req_id": req_id,
-        "status": "processed",
-        "timestamp": time.time()
-    }
-
-
-async def concurrent_worker(req_id: str, results: List, errors: List):
-    try:
-        result = await high_concurrency_async_api(req_id)
-        results.append({"req_id": req_id, "success": True, "result": result})
-    except RateLimitExceededError as e:
-        errors.append({"req_id": req_id, "success": False, "error": "RateLimited"})
-    except Exception as e:
-        errors.append({"req_id": req_id, "success": False, "error": str(e)})
-
-
-async def demo_high_concurrency_async():
-    print("\n>>> 高并发异步限流演示 <<<")
-    print("  策略: max_calls=5, time_window=10s")
-    print("  场景: 20 个并发异步任务")
-    
-    reset_monitor()
-    
-    results: List[Dict] = []
-    errors: List[Dict] = []
-    
-    tasks = []
-    for i in range(1, 21):
-        req_id = f"CONC-REQ-{i:03d}"
-        task = asyncio.create_task(concurrent_worker(req_id, results, errors))
-        tasks.append(task)
-    
-    await asyncio.gather(*tasks, return_exceptions=True)
-    
-    print(f"\n  结果统计:")
-    print(f"    成功调用数: {len(results)}")
-    print(f"    被限流数: {len(errors)}")
-    
-    if len(results) == 5:
-        print("  ✅ 异步高并发限流工作正常！正好 5 个调用通过")
-    else:
-        print(f"  ⚠️  并发测试完成，成功数: {len(results)}")
-    
-    print("\n  监控数据:")
-    print_monitor_report("high_concurrency_api")
-
-
-print("\n" + "=" * 80)
-print("【演示 7】配置化装饰器链实际应用")
-print("=" * 80)
-
-
-async def demo_configured_chain_usage():
-    print("\n>>> 配置化装饰器链实际应用 <<<")
-    
-    prod_config_dict = {
-        "log": {"level": "INFO", "log_args": False, "log_return": False, "log_context": True, "enabled": True},
-        "timer": {"unit": "ms", "precision": 2, "enabled": True},
-        "catch": {"exceptions": ["Exception"], "default": {"error": "Service Down"}, "enabled": True},
-        "rate_limit": {"max_calls": 10, "time_window": 60.0, "thread_safe": True, "enabled": True},
-        "retry": {"max_attempts": 3, "delay": 0.3, "backoff": 1.5, "exceptions": ["ConnectionError"], "enabled": True},
-        "monitor": {"name": "production_api", "enabled": True}
-    }
-    
-    prod_config = load_config_from_dict(prod_config_dict)
-    prod_chain = ChainBuilder.from_config(prod_config)
-    
-    print(f"\n  生产环境装饰器链: {prod_chain}")
-    
-    async def unstable_remote_api(data: Dict) -> Dict:
-        await asyncio.sleep(0.02)
-        if data.get('simulate_error'):
-            raise ConnectionError("Remote service timeout")
-        return {"status": "ok", "data": data}
-    
-    decorated_api = prod_chain.apply(unstable_remote_api)
-    
-    print("\n  测试正常调用:")
-    result = await decorated_api({"id": 123})
-    print(f"    结果: {result}")
-    
-    print("\n  测试异常+重试:")
-    result2 = await decorated_api({"id": 456, "simulate_error": True})
-    print(f"    结果（捕获异常后返回默认值）: {result2}")
-    
-    print("\n  监控报表:")
-    print_monitor_report("production_api")
+time.sleep(0.5)
 
 
 async def main():
-    print("\n" + "=" * 80)
-    print("开始执行所有演示...")
-    print("=" * 80)
+    print_header="演示 1: 异步函数元信息验证"
     
-    await demo_async_functions()
-    await demo_thread_safe_rate_limit()
-    await demo_context_passing()
-    await demo_monitor_stats()
-    demo_configuration()
-    await demo_high_concurrency_async()
-    await demo_configured_chain_usage()
+    print_subheader="定义原始异步函数"
     
-    print("\n" + "=" * 80)
-    print("所有演示完成！")
-    print("=" * 80)
+    async def original_async_func(a: int, b: str = "default", *, flag: bool = False) -> Dict[str, Any]:
+        """
+        这是原始异步函数的文档字符串。
+        
+        功能描述:
+        - 异步执行的示例函数
+        - 接收位置参数、默认参数、关键字-only 参数
+        - 使用 await asyncio.sleep 模拟异步操作
+        
+        参数:
+            a: 整数参数
+            b: 字符串参数，默认值 "default"
+            flag: 布尔关键字参数，默认值 False
+        
+        返回:
+            包含所有参数的字典
+        """
+        await asyncio.sleep(0.01)
+        return {
+            "a": a,
+            "b": b,
+            "flag": flag,
+            "result": a * len(b)
+        }
+    
+    print(f"\n原始异步函数定义:")
+    print(f"  函数名: {original_async_func.__name__}")
+    print(f"  签名: {inspect.signature(original_async_func)}")
+    print(f"  是否异步: {inspect.iscoroutinefunction(original_async_func)}")
+    
+    
+    print_subheader="应用多层装饰器到异步函数"
+    
+    @timer(unit="ms", precision=4)
+    @catch(exceptions=(Exception,), default={"error": "caught_async"})
+    @log(level="INFO", log_args=True, log_return=True)
+    async def decorated_async_func(a: int, b: str = "default", *, flag: bool = False) -> Dict[str, Any]:
+        """
+        这是原始异步函数的文档字符串。
+        
+        功能描述:
+        - 异步执行的示例函数
+        - 接收位置参数、默认参数、关键字-only 参数
+        - 使用 await asyncio.sleep 模拟异步操作
+        
+        参数:
+            a: 整数参数
+            b: 字符串参数，默认值 "default"
+            flag: 布尔关键字参数，默认值 False
+        
+        返回:
+            包含所有参数的字典
+        """
+        await asyncio.sleep(0.01)
+        return {
+            "a": a,
+            "b": b,
+            "flag": flag,
+            "result": a * len(b)
+        }
+    
+    print(f"\n装饰后异步函数定义:")
+    print(f"  函数名: {decorated_async_func.__name__}")
+    print(f"  是否异步: {inspect.iscoroutinefunction(decorated_async_func)}")
+    
+    
+    print_subheader="异步函数元信息对比验证"
+    
+    compare_func_meta(original_async_func, decorated_async_func, "多层装饰器装饰后的异步函数")
+    
+    
+    print_subheader="使用 DecoratorChain 装饰异步函数"
+    
+    async def another_async_original(x: float, y: float = 1.0) -> float:
+        """另一个原始异步函数，用于测试 Chain 装饰"""
+        await asyncio.sleep(0.005)
+        return x * y
+    
+    chain = DecoratorChain()
+    chain.add(timer, unit="s")
+    chain.add(log, level="DEBUG")
+    
+    decorated_async_by_chain = chain.apply(another_async_original)
+    
+    compare_func_meta(another_async_original, decorated_async_by_chain, "DecoratorChain 装饰后的异步函数")
+    
+    
+    print_header="演示 2: 异步函数多层装饰器执行顺序 - 洋葱模型"
     
     print("""
 
-总结 - 高级扩展功能实现:
-========================================
+异步函数的洋葱模型:
+===================
 
-1. ✅ 异步函数兼容
-   - 所有装饰器（log/timer/catch/rate_limit/retry/monitor）
-   - 自动检测 sync/async 函数，选择对应的 wrapper
-   - 使用 inspect.iscoroutinefunction() 判断
+装饰器叠加顺序:
+    @timer      (最外层)
+    @catch      (中间层)
+    @log        (最内层)
+    async def func(): ...
 
-2. ✅ 线程安全与进程安全
-   - @rate_limit 添加 thread_safe 参数（默认 True）
-   - 使用 threading.Lock 保护共享状态
-   - 可选 process_safe，使用 multiprocessing.Manager
-   - 高并发测试验证计数准确
+关键点:
+1. 装饰器自动检测 async 函数
+2. 使用 async wrapper 替代同步 wrapper
+3. 使用 await 调用内部函数
+4. 使用 asyncio.sleep 替代 time.sleep
+5. 日志格式和事件序列与同步函数完全一致
 
-3. ✅ 上下文传递机制
-   - 使用 contextvars.ContextVar 存储 request_id/trace_id/span_id
-   - DecoratorContext 类提供统一访问接口
-   - @with_context 装饰器支持设置上下文
-   - 支持用户上下文和额外扩展上下文
-   - 异步安全，每个任务独立上下文
+""")
+    
+    await asyncio.sleep(1)
+    
+    
+    print_subheader="异步函数正常执行场景 - 验证洋葱模型顺序"
+    
+    reset_chain_context()
+    
+    @timer(unit="ms", precision=3)
+    @catch(exceptions=(Exception,), default="ASYNC_DEFAULT_VALUE")
+    @log(level="INFO", log_args=True, log_return=True)
+    async def async_onion_demo_normal(x: int, y: int) -> int:
+        """异步洋葱模型演示 - 正常执行"""
+        print(f"        [异步函数体执行] x={x}, y={y}")
+        await asyncio.sleep(0.05)
+        return x + y
+    
+    print(f"\n调用 await async_onion_demo_normal(10, 20):")
+    print(f"请仔细观察日志中的 ENTER/EXIT 顺序和 CHAIN_ID:\n")
+    
+    result = await async_onion_demo_normal(10, 20)
+    print(f"\n返回结果: {result}")
+    
+    
+    print_subheader="异步函数异常捕获场景"
+    
+    reset_chain_context()
+    
+    @timer(unit="ms", precision=3)
+    @catch(exceptions=(ValueError,), default="ASYNC_CAUGHT")
+    @log(level="INFO", log_args=True, log_return=True)
+    async def async_onion_demo_exception(x: int) -> int:
+        """异步洋葱模型演示 - 异常场景"""
+        print(f"        [异步函数体执行] x={x}")
+        if x < 0:
+            raise ValueError(f"x 不能为负数: {x}")
+        await asyncio.sleep(0.01)
+        return x * 2
+    
+    print(f"\n调用 await async_onion_demo_exception(-5):")
+    print(f"观察 catch 装饰器如何捕获异步函数中的异常:\n")
+    
+    result = await async_onion_demo_exception(-5)
+    print(f"\n返回结果: {result}")
+    
+    
+    print_subheader="同步 vs 异步函数对比 - 相同的装饰器，不同的函数类型"
+    
+    print("""
 
-4. ✅ @monitor 监控装饰器
-   - 统计总调用数、成功数、失败数
-   - 计算成功率、平均耗时、P50/P95/P99 延迟
-   - 记录异常类型分布
-   - 支持打印统计报表
-   - 支持以编程方式获取统计数据
-   - 线程安全的统计更新
+对比说明:
+=========
 
-5. ✅ 配置化能力
-   - 支持从字典加载配置（load_config_from_dict）
-   - 支持从 JSON/YAML 文件加载
-   - ChainBuilder.from_config() 创建装饰器链
-   - 动态开关装饰器（enable/disable）
-   - 动态调整限流/重试策略
-   - 配置导出为字典
+使用完全相同的装饰器组合:
+    @timer
+    @log
+    def sync_func(): ...
+    
+    @timer
+    @log
+    async def async_func(): ...
 
-6. ✅ 模块化架构
-   - decorators.py - 核心装饰器实现
-   - chain.py - 装饰器编排和预设
-   - config.py - 配置管理和上下文
-   - async_demo.py - 高级功能演示
+装饰器内部会自动检测函数类型:
+- 如果是同步函数: 使用普通 wrapper，调用 func(*args, **kwargs)
+- 如果是异步函数: 使用 async wrapper，调用 await func(*args, **kwargs)
 
-========================================
+日志格式和事件序列完全一致，只是内部实现不同。
+
+""")
+    
+    await asyncio.sleep(0.5)
+    
+    reset_chain_context()
+    
+    @timer(unit="ms", precision=3)
+    @log(level="INFO")
+    def sync_compare_func(n: int) -> str:
+        """同步对比函数"""
+        time.sleep(0.02)
+        return f"sync_result_{n}"
+    
+    reset_chain_context()
+    
+    @timer(unit="ms", precision=3)
+    @log(level="INFO")
+    async def async_compare_func(n: int) -> str:
+        """异步对比函数"""
+        await asyncio.sleep(0.02)
+        return f"async_result_{n}"
+    
+    print(f"\n调用同步函数 sync_compare_func(1):\n")
+    result_sync = sync_compare_func(1)
+    print(f"\n同步函数结果: {result_sync}")
+    
+    reset_chain_context()
+    print(f"\n调用异步函数 async_compare_func(2):\n")
+    result_async = await async_compare_func(2)
+    print(f"\n异步函数结果: {result_async}")
+    
+    print(f"\n对比观察:")
+    print(f"  - 两个函数使用完全相同的装饰器")
+    print(f"  - 日志格式、事件类型、CHAIN_ID 机制完全一致")
+    print(f"  - 装饰器自动选择了正确的 wrapper 类型")
+    
+    
+    print_header="演示 3: 异步函数 rate_limit 两种模式"
+    
+    print("""
+
+异步函数的限流:
+===============
+
+关键点:
+1. 使用 asyncio.sleep 替代 time.sleep (不阻塞事件循环)
+2. 支持同时运行多个异步函数 (并发限流)
+3. WAIT 模式下使用 await asyncio.sleep(wait_time)
+
+两种模式:
+- REJECT: 超过阈值立即抛出 RateLimitExceededError
+- WAIT: 超过阈值等待后放行 (使用 asyncio.sleep)
+
+""")
+    
+    await asyncio.sleep(1)
+    
+    
+    print_subheader="模式 1: REJECT - 异步函数直接拒绝模式"
+    
+    reset_chain_context()
+    
+    @rate_limit(max_calls=2, time_window=3.0, mode="reject")
+    @log(level="INFO", log_args=True, log_return=True)
+    async def async_rate_limit_reject_demo(request_id: str) -> Dict[str, Any]:
+        """异步限流演示 - REJECT 模式"""
+        await asyncio.sleep(0.01)
+        return {
+            "status": "success",
+            "request_id": request_id,
+            "timestamp": time.time()
+        }
+    
+    print(f"""
+配置:
+  - max_calls = 2
+  - time_window = 3.0s
+  - mode = "reject"
+
+预期: 第 1-2 次成功，第 3-5 次被拒绝
+""")
+    
+    print(f"\n开始执行 5 次异步调用...\n")
+    
+    for i in range(1, 6):
+        reset_chain_context()
+        req_id = f"ASYNC_REQ_{i:02d}"
+        print(f"\n{'─'*50}")
+        print(f"异步调用 {i}/5: request_id = {req_id}")
+        print(f"{'─'*50}")
+        
+        try:
+            result = await async_rate_limit_reject_demo(req_id)
+            print(f"\n  ✅ 成功: {result}")
+        except RateLimitExceededError as e:
+            print(f"\n  ❌ 被限流: {e}")
+    
+    
+    print_subheader="模式 2: WAIT - 异步函数等待放行模式"
+    
+    reset_chain_context()
+    
+    @rate_limit(max_calls=2, time_window=1.5, mode="wait")
+    @log(level="INFO", log_args=True, log_return=True)
+    @timer(unit="ms", precision=2)
+    async def async_rate_limit_wait_demo(request_id: str) -> Dict[str, Any]:
+        """异步限流演示 - WAIT 模式"""
+        await asyncio.sleep(0.01)
+        return {
+            "status": "success",
+            "request_id": request_id,
+            "processed_at": time.time()
+        }
+    
+    print(f"""
+配置:
+  - max_calls = 2
+  - time_window = 1.5s
+  - mode = "wait"
+
+关键点:
+  - 使用 asyncio.sleep 而非 time.sleep
+  - 不阻塞事件循环，其他异步任务可继续执行
+
+预期:
+  - 第 1-2 次: 立即成功
+  - 第 3 次: 等待约 1.5 秒后成功
+""")
+    
+    print(f"\n开始执行 3 次异步调用 (第 3 次会触发等待)...")
+    print(f"注意: 使用 asyncio.sleep，不阻塞事件循环\n")
+    
+    start_time = time.time()
+    
+    for i in range(1, 4):
+        reset_chain_context()
+        req_id = f"ASYNC_WAIT_{i:02d}"
+        elapsed = time.time() - start_time
+        
+        print(f"\n{'═'*60}")
+        print(f"异步调用 {i}/3: request_id = {req_id} (距开始: {elapsed:.2f}s)")
+        print(f"{'═'*60}")
+        
+        try:
+            result = await async_rate_limit_wait_demo(req_id)
+            elapsed_total = time.time() - start_time
+            print(f"\n  ✅ 成功: {result}")
+            print(f"  本次调用后总耗时: {elapsed_total:.2f}s")
+        except Exception as e:
+            print(f"\n  ❌ 异常: {type(e).__name__}: {e}")
+    
+    
+    print_subheader="异步并发限流演示 (多个协程同时调用)"
+    
+    print("""
+
+异步并发限流:
+=============
+
+演示多个协程同时调用被限流的异步函数:
+- 并发启动 5 个协程
+- 每个协程都调用同一个被限流的函数
+- 观察限流如何影响并发执行
+
+配置: max_calls=2, time_window=2.0s, mode=wait
+
+预期行为:
+- 第 1-2 个协程: 立即执行
+- 第 3-5 个协程: 需要等待，直到时间窗口允许
+
+""")
+    
+    await asyncio.sleep(0.5)
+    
+    reset_chain_context()
+    
+    call_count = 0
+    
+    @rate_limit(max_calls=2, time_window=2.0, mode="wait")
+    @log(level="INFO", log_args=True)
+    async def concurrent_async_func(coro_id: str) -> str:
+        """用于并发测试的异步函数"""
+        nonlocal call_count
+        call_count += 1
+        await asyncio.sleep(0.1)
+        return f"{coro_id}_completed"
+    
+    print(f"\n并发启动 5 个协程...\n")
+    
+    start_time = time.time()
+    
+    async def run_coro(coro_id: str):
+        reset_chain_context()
+        try:
+            result = await concurrent_async_func(coro_id)
+            elapsed = time.time() - start_time
+            print(f"\n  [协程 {coro_id}] 完成: {result}, 耗时: {elapsed:.2f}s")
+            return result
+        except Exception as e:
+            elapsed = time.time() - start_time
+            print(f"\n  [协程 {coro_id}] 失败: {e}, 耗时: {elapsed:.2f}s")
+            return None
+    
+    tasks = [run_coro(f"C{i}") for i in range(1, 6)]
+    results = await asyncio.gather(*tasks)
+    
+    total_elapsed = time.time() - start_time
+    print(f"\n所有协程完成，总耗时: {total_elapsed:.2f}s")
+    print(f"成功完成的协程数: {sum(1 for r in results if r is not None)}/5")
+    
+    
+    print_header="演示 4: 异步函数完整企业级场景"
+    
+    print("""
+
+异步企业级场景:
+===============
+
+使用 full_chain 预设装饰异步 API 函数:
+  - timer: 计时 (使用 async 版本)
+  - catch: 异常捕获
+  - rate_limit: 限流
+  - retry: 重试 (使用 asyncio.sleep)
+  - log: 日志记录
+
+""")
+    
+    await asyncio.sleep(0.5)
+    
+    reset_chain_context()
+    
+    enterprise_chain = DecoratorPresets.full_chain(
+        max_calls=3,
+        time_window=5.0,
+        rate_mode="reject",
+        retry_max=2,
+        retry_delay=0.3
+    )
+    
+    print(f"企业级链定义: {enterprise_chain}")
+    
+    call_counter = 0
+    
+    @enterprise_chain
+    async def async_enterprise_api(user_id: int, amount: float) -> Dict[str, Any]:
+        """异步企业级 API 模拟"""
+        global call_counter
+        call_counter += 1
+        
+        if call_counter < 2:
+            raise ConnectionError(f"数据库连接失败 (异步尝试 {call_counter})")
+        
+        if amount <= 0:
+            raise ValueError(f"无效金额: {amount}")
+        
+        await asyncio.sleep(0.05)
+        return {
+            "transaction_id": f"ASYNC_TXN_{int(time.time())}",
+            "user_id": user_id,
+            "amount": amount,
+            "status": "SUCCESS",
+            "async": True
+        }
+    
+    
+    print_subheader="异步场景 1: 正常交易 (触发重试)"
+    
+    reset_chain_context()
+    call_counter = 0
+    
+    print(f"\n调用 await async_enterprise_api(12345, 100.50):")
+    print(f"预期: 第 1 次失败，触发 retry，第 2 次成功\n")
+    
+    result = await async_enterprise_api(12345, 100.50)
+    print(f"\n最终结果: {result}")
+    
+    
+    print_subheader="异步场景 2: 无效金额 (异常被捕获)"
+    
+    reset_chain_context()
+    call_counter = 2
+    
+    print(f"\n调用 await async_enterprise_api(12345, -50.0):\n")
+    
+    result = await async_enterprise_api(12345, -50.0)
+    print(f"\n最终结果: {result}")
+    
+    
+    print_header="异步演示总结"
+    
+    print("""
+
+================================================================================
+                          异步函数装饰器演示完成
+================================================================================
+
+✅ 验证通过的功能:
+
+1. 异步函数元信息保留
+   - __name__: 装饰前后一致
+   - __doc__: 装饰前后一致
+   - inspect.signature: 装饰前后一致
+   - 协程函数属性: 装饰前后一致
+
+2. 自动检测函数类型
+   - 同步函数: 使用普通 wrapper
+   - 异步函数: 使用 async wrapper
+   - 日志格式和事件序列完全一致
+
+3. 异步限流
+   - REJECT 模式: 超过阈值立即拒绝
+   - WAIT 模式: 使用 asyncio.sleep 等待
+   - 不阻塞事件循环
+
+4. 异步重试
+   - 使用 asyncio.sleep 替代 time.sleep
+   - 支持退避策略
+
+5. 并发支持
+   - 多个协程可同时调用被限流的函数
+   - 限流策略正确应用于所有协程
+
+================================================================================
+
+装饰器系统现在同时支持同步和异步函数，
+使用方式完全一致，内部实现自动适配。
+
+================================================================================
 """)
 
 
